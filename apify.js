@@ -77,7 +77,7 @@ async function getDatasetItems(datasetId) {
 
 /**
  * Run Reddit actor, poll until done, return dataset items.
- * Uses trudax/reddit-scraper-lite (startUrls) or alex_claw (subreddits) format.
+ * Supports: trudax (startUrls), crawlerbros (maxPosts), alex_claw (maxPostsPerSubreddit).
  */
 async function runRedditActor(subreddits, maxPostsPerSubreddit = 100, sort = 'new') {
   const actorId = process.env.APIFY_REDDIT_ACTOR || DEFAULT_REDDIT_ACTOR;
@@ -91,6 +91,17 @@ async function runRedditActor(subreddits, maxPostsPerSubreddit = 100, sort = 'ne
       sort: sort || 'new',
       proxy: { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'] },
       skipComments: true,
+    };
+  } else if (actorId.includes('crawlerbros')) {
+    input = {
+      subreddits,
+      maxPosts: Math.min(maxPostsPerSubreddit, 1000),
+      sort: sort || 'new',
+      timeFilter: 'week',
+      proxyConfiguration: {
+        useApifyProxy: true,
+        apifyProxyGroups: ['RESIDENTIAL'],
+      },
     };
   } else {
     input = {
