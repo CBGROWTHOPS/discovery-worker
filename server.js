@@ -1,5 +1,5 @@
 const express = require('express');
-const { runDiscovery } = require('./discovery');
+const { runDiscovery } = require('./discovery-apify');
 
 const app = express();
 app.use(express.json({ limit: '64kb' }));
@@ -11,6 +11,13 @@ app.get('/health', (_req, res) => {
 });
 
 app.post('/reddit/discovery', async (req, res) => {
+  if (!process.env.APIFY_TOKEN?.trim()) {
+    return res.status(503).json({
+      error: 'APIFY_TOKEN not configured',
+      message: 'Set APIFY_TOKEN in Railway environment variables',
+      cursor: 0, nextCursor: null, processedCount: 0, communities: [], nearMisses: [],
+    });
+  }
   try {
     const body = req.body || {};
     const seedList = Array.isArray(body.seedList) ? body.seedList : null;
