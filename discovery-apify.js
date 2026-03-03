@@ -2,7 +2,7 @@
  * Discovery via Apify: run actor, normalize, score, upsert Supabase, return summary.
  */
 
-const { runAndFetch } = require('./apify');
+const { runRedditActor } = require('./apify');
 const {
   HEALTHCARE_FRICTION_KEYWORDS,
   OUT_OF_MARKET_SIGNALS,
@@ -56,19 +56,27 @@ function toUnix(createdUtc) {
 
 /**
  * Normalize Apify dataset item to our post shape.
- * Apify: subreddit, postId, title, selfText, score, numComments, createdUtc, url, permalink
+ * Supports: alex_claw (subreddit, postId, selfText, numComments, createdUtc)
+ *           trudax (communityName, body, numberOfComments, createdAt, upVotes)
  */
 function normalizePost(item) {
+  const sub = (item.subreddit || item.communityName || item.parsedCommunityName || '').toLowerCase();
+  const selftext = item.selfText ?? item.body ?? '';
+  const score = item.score ?? item.upVotes ?? 0;
+  const numComments = item.numComments ?? item.numberOfComments ?? 0;
+  const createdUtcRaw = item.createdUtc ?? item.createdAt;
+  const url = item.url || (item.permalink ? `https://reddit.com${item.permalink.startsWith('/') ? '' : '/'}${item.permalink}` : '');
+  const permalink = item.permalink || (item.url || '').replace(/^https?:\/\/(www\.)?reddit\.com/, '') || url;
   return {
     id: item.postId || item.id,
-    subreddit: (item.subreddit || '').toLowerCase(),
+    subreddit: sub,
     title: item.title || '',
-    selftext: item.selfText || '',
-    score: item.score ?? 0,
-    num_comments: item.numComments ?? 0,
-    created_utc: toUnix(item.createdUtc),
-    permalink: item.permalink || item.url || '',
-    url: item.url || (item.permalink ? `https://reddit.com${item.permalink.startsWith('/') ? '' : '/'}${item.permalink}` : ''),
+    selftext,
+    score,
+    num_comments: numComments,
+    created_utc: toUnix(createdUtcRaw),
+    permalink,
+    url,
   };
 }
 
@@ -104,7 +112,7 @@ async function runDiscovery(opts) {
   let runId;
   let items = [];
   try {
-    const result = await runAndFetch(subsToScrape, Math.min(limitPerSub, 500), 'new');
+    const result = await runRedditActor(subsToScrape, Math.min(limitPerSub, 500), 'new');
     runId = result.runId;
     items = result.items || [];
   } catch (e) {

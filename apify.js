@@ -4,7 +4,7 @@
  */
 
 const APIFY_BASE = 'https://api.apify.com/v2';
-const ACTOR_ID = 'alex_claw~reddit-scraper';
+const DEFAULT_REDDIT_ACTOR = 'trudax~reddit-scraper-lite';
 const POLL_INTERVAL_MS = 3000;
 const POLL_TIMEOUT_MS = 300000; // 5 min
 
@@ -34,9 +34,10 @@ async function api(path, opts = {}) {
 
 /**
  * Start async actor run. Returns { id, defaultDatasetId }.
+ * @param {string} actorId - e.g. 'trudax~reddit-scraper-lite'
  */
-async function startRun(input) {
-  const body = await api(`/acts/${ACTOR_ID}/runs`, {
+async function startRun(actorId, input) {
+  const body = await api(`/acts/${actorId}/runs`, {
     method: 'POST',
     body: JSON.stringify(input),
   });
@@ -75,27 +76,43 @@ async function getDatasetItems(datasetId) {
 }
 
 /**
- * Run actor, poll until done, return dataset items.
+ * Run Reddit actor, poll until done, return dataset items.
+ * Uses trudax/reddit-scraper-lite (startUrls) or alex_claw (subreddits) format.
  */
-async function runAndFetch(subreddits, maxPostsPerSubreddit = 100, sort = 'new') {
-  const input = {
-    subreddits,
-    maxPostsPerSubreddit,
-    sort,
-    includeComments: false,
-    proxyConfiguration: {
-      useApifyProxy: true,
-      apifyProxyGroups: ['RESIDENTIAL'],
-    },
-  };
+async function runRedditActor(subreddits, maxPostsPerSubreddit = 100, sort = 'new') {
+  const actorId = process.env.APIFY_REDDIT_ACTOR || DEFAULT_REDDIT_ACTOR;
 
-  const { id: runId, defaultDatasetId } = await startRun(input);
+  let input;
+  if (actorId.includes('trudax')) {
+    const startUrls = subreddits.map((s) => ({ url: `https://www.reddit.com/r/${s}/new` }));
+    input = {
+      startUrls,
+      maxItems: Math.min(subreddits.length * maxPostsPerSubreddit, 1000),
+      sort: sort || 'new',
+      proxy: { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'] },
+      skipComments: true,
+    };
+  } else {
+    input = {
+      subreddits,
+      maxPostsPerSubreddit,
+      sort,
+      includeComments: false,
+      proxyConfiguration: {
+        useApifyProxy: true,
+        apifyProxyGroups: ['RESIDENTIAL'],
+      },
+    };
+  }
+
+  const { id: runId, defaultDatasetId } = await startRun(actorId, input);
   const start = Date.now();
 
   while (Date.now() - start < POLL_TIMEOUT_MS) {
     const { status } = await getRunStatus(runId);
     if (status === 'SUCCEEDED') {
-      return { runId, datasetId: defaultDatasetId, items: await getDatasetItems(defaultDatasetId) };
+      const items = await getDatasetItems(defaultDatasetId);
+      return { runId, datasetId: defaultDatasetId, items };
     }
     if (status === 'FAILED' || status === 'ABORTED' || status === 'TIMED-OUT') {
       throw new Error(`Apify run ${status}: ${runId}`);
@@ -106,4 +123,23 @@ async function runAndFetch(subreddits, maxPostsPerSubreddit = 100, sort = 'new')
   throw new Error(`Apify run timed out after ${POLL_TIMEOUT_MS / 1000}s`);
 }
 
-module.exports = { runAndFetch, getToken };
+/**
+ * Run any Apify actor with given input. Returns { runId, items }.
+ */
+async function runActor(actorId, input) {
+  const { id: runId, defaultDatasetId } = await startRun(actorId, input);
+  const start = Date.now();
+  while (Date.now() - start < POLL_TIMEOUT_MS) {
+    const { status } = await getRunStatus(runId);
+    if (status === 'SUCCEEDED') {
+      return { runId, items: await getDatasetItems(defaultDatasetId) };
+    }
+    if (status === 'FAILED' || status === 'ABORTED' || status === 'TIMED-OUT') {
+      throw new Error(`Apify run ${status}: ${runId}`);
+    }
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  }
+  throw new Error(`Apify run timed out after ${POLL_TIMEOUT_MS / 1000}s`);
+}
+
+module.exports = { runRedditActor, runActor, startRun, getRunStatus, getDatasetItems, getToken };
