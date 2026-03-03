@@ -1,30 +1,38 @@
-// Search phrases: ICP (who they are) + friction (pain). Finds communities where target personas are AND where friction is expressed.
+// Layer 1 — Wide pain search: friction phrases (evidence first)
+const PAIN_SEARCH_BLOCKS = {
+  costBarrier: ["can't afford", "cant afford", "too expensive", "medical bill", "ER bill", "urgent care cost", "prescription cost"],
+  insuranceFriction: ["deductible", "no insurance", "insurance won't cover", "high deductible", "out of pocket"],
+  accessFriction: ["nearest doctor", "long drive", "no clinic near me", "wait time"],
+};
 const SEARCH_KEYWORDS = [
-  // Friction (pain)
-  'medical bill',
-  'cant afford insurance',
-  'no insurance',
-  'high deductible',
-  'uninsured',
-  'out of pocket',
-  'afford healthcare',
-  'medical cost',
-  'no benefits',
-  // ICP (where target personas could be)
-  'gig worker',
-  'freelancer healthcare',
-  'self employed insurance',
-  '1099 benefits',
-  'contractor health',
-  'no employer insurance',
-  'family health plan',
-  'roommates insurance',
-  'rural healthcare',
-  'budget healthcare',
+  ...PAIN_SEARCH_BLOCKS.costBarrier,
+  ...PAIN_SEARCH_BLOCKS.insuranceFriction,
+  ...PAIN_SEARCH_BLOCKS.accessFriction,
+].filter((v, i, a) => a.indexOf(v) === i);
+
+// Post-level pain scoring (weighted)
+const POST_PAIN_SCORES = {
+  costBarrier: 3,
+  noInsurance: 3,
+  deductible: 2,
+  delayedCare: 2,
+  askingAlternatives: 2,
+  urgentCare: 1,
+  distance: 1,
+};
+
+// ICP persona signals (who they are) - for icpMatchScore
+const ICP_KEYWORDS = [
+  'gig', 'freelance', '1099', 'contractor', 'self-employed', 'self employed',
+  'no benefits', 'no employer', 'side hustle', 'sidehustle',
+  'family plan', 'roommate', 'roommates', 'split rent', 'budget',
+  'rural', 'lower income', 'uninsured', 'underinsured', 'high deductible',
+  'teachers', 'bartender', 'server', 'trucker', 'nurse', 'delivery driver',
 ];
 
 module.exports = {
   SEARCH_KEYWORDS,
+  ICP_KEYWORDS,
   HEALTHCARE_FRICTION_KEYWORDS: [
     'cant afford', "can't afford", "can't afford healthcare", 'cant afford doctor',
     'no insurance', 'without insurance', 'no insurance what do i do', 'uninsured',
@@ -40,6 +48,26 @@ module.exports = {
     'ukinvesting', 'ukfrugal', 'ukjobs', 'canadafinance', 'personalfinancecanada',
     'nhs', 'askuk', 'australia', 'canada',
   ],
+  PAIN_SEARCH_BLOCKS,
+  POST_PAIN_SCORES,
+  PRIORITY_SEEDS: [
+    'uberdrivers', 'doordash', 'lyftdrivers', 'instacartshoppers', 'freelance', 'selfemployed',
+    'povertyfinance', 'frugal', 'debt', 'studentloans', 'adulting',
+    'parenting', 'Mommit', 'singleparents',
+    'rural', 'smalltown', 'montana', 'wyoming',
+    'assistance', 'foodstamps', 'snap', 'disability',
+  ],
+  SECONDARY_SEEDS: [
+    'healthinsurance', 'medicalbilling', 'legaladvice', 'AskDocs', 'pharmacy',
+    'grubhubdrivers', 'amazonflexdrivers', 'workonline', 'sidehustle', 'budget',
+    'daddit', 'AskParents', 'westvirginia', 'homestead', 'college', 'GradSchool', 'roommates',
+  ],
+  PROMOTION_PAIN_DENSITY: 0.2,
+  PROMOTION_QUALIFYING_POSTS: 5,
+  STOP_TARGET_COMMUNITIES: 60,
+  STOP_PAIN_DENSITY_FLOOR: 0.05,
+  PRUNING_DRY_RUNS: 5,
+  PRUNING_FORBIDDEN_TWICE: 2,
   SEED_SUBREDDITS: [
     'uberdrivers', 'freelance', 'doordash', 'lyftdrivers', 'healthinsurance',
     'instacartshoppers', 'grubhubdrivers', 'selfemployed', 'amazonflexdrivers',

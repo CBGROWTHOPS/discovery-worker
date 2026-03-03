@@ -5,15 +5,33 @@
 const { runRedditActor, runRedditSearch } = require('./apify');
 const {
   HEALTHCARE_FRICTION_KEYWORDS,
+  ICP_KEYWORDS,
   SEARCH_KEYWORDS,
   OUT_OF_MARKET_SIGNALS,
   NON_US_SUBREDDITS,
   SEED_SUBREDDITS,
+  PRIORITY_SEEDS,
+  SECONDARY_SEEDS,
   MIN_MEMBERS,
   CO_OCCURRING_TOP_N,
   STOPWORDS,
+  POST_PAIN_SCORES,
+  PAIN_SEARCH_BLOCKS,
+  PROMOTION_PAIN_DENSITY,
+  PROMOTION_QUALIFYING_POSTS,
+  STOP_TARGET_COMMUNITIES,
+  STOP_PAIN_DENSITY_FLOOR,
+  PRUNING_DRY_RUNS,
+  PRUNING_FORBIDDEN_TWICE,
 } = require('./discovery-constants');
-const { upsertDiscoveryRun, upsertCommunities } = require('./supabase-discovery');
+const {
+  upsertDiscoveryRun,
+  upsertCommunities,
+  upsertSeedRun,
+  getDiscoveredSeeds,
+  upsertDiscoveredSeed,
+  getDemotedSeeds,
+} = require('./supabase-discovery');
 
 function isNonUsSub(sub) {
   return NON_US_SUBREDDITS.includes((sub || '').toLowerCase());
@@ -27,6 +45,31 @@ function hasOutOfMarketSignal(text) {
 function qualifiesForProblemSpace(text, keywords) {
   const lower = (text || '').toLowerCase();
   return keywords.some((kw) => lower.includes(kw.toLowerCase()));
+}
+
+/** Post-level pain score (weighted). Only include posts with num_comments >= 1. */
+function computePostPainScore(text) {
+  const lower = (text || '').toLowerCase();
+  let score = 0;
+  const costTerms = ["can't afford", "cant afford", "too expensive", "medical bill", "er bill", "urgent care cost", "prescription cost"];
+  if (costTerms.some((t) => lower.includes(t))) score += POST_PAIN_SCORES.costBarrier;
+  if (/\bno insurance\b|uninsured|without insurance|insurance won't cover/i.test(lower)) score += POST_PAIN_SCORES.noInsurance;
+  if (/\bdeductible\b|high deductible/i.test(lower)) score += POST_PAIN_SCORES.deductible;
+  if (/delayed care|skip healthcare|put off|postponed|couldn't afford to go/i.test(lower)) score += POST_PAIN_SCORES.delayedCare;
+  if (/alternative|cheaper option|what else can i do|affordable option|cheaper alternative/i.test(lower)) score += POST_PAIN_SCORES.askingAlternatives;
+  if (/urgent care/i.test(lower)) score += POST_PAIN_SCORES.urgentCare;
+  if (/nearest doctor|long drive|no clinic|clinic near me|distance|hours away/i.test(lower)) score += POST_PAIN_SCORES.distance;
+  return score;
+}
+
+/** Score 0-100: how much this community matches ICP personas (from text + sub name) */
+function icpMatchScore(subredditName, text) {
+  const lower = ((subredditName || '') + ' ' + (text || '')).toLowerCase();
+  let hits = 0;
+  for (const kw of ICP_KEYWORDS) {
+    if (lower.includes(kw.toLowerCase())) hits++;
+  }
+  return Math.min(100, hits * 15);
 }
 
 function extractCoOccurring(text, frictionKeywords, topN = CO_OCCURRING_TOP_N) {
@@ -107,7 +150,8 @@ async function runDiscovery(opts) {
         const sub = (item.subreddit || item.communityName || item.parsedCommunityName || '').toLowerCase();
         if (sub && !isNonUsSub(sub)) uniqueSubs.add(sub);
       }
-      subsToScrape = [...uniqueSubs];
+      const allSubs = [...uniqueSubs];
+      subsToScrape = allSubs.slice(cursor, cursor + subsLimit);
     } catch (e) {
       console.error('Apify search error:', e);
       return {
@@ -126,13 +170,31 @@ async function runDiscovery(opts) {
       };
     }
   } else {
-    const seeds =
-      seedList?.length > 0
-        ? seedList
-            .filter((s) => typeof s === 'string')
-            .map((s) => s.replace(/^r\//, '').toLowerCase())
-            .filter((s) => !isNonUsSub(s))
-        : SEED_SUBREDDITS.filter((s) => !isNonUsSub(s));
+    let seeds;
+    const seedTierMap = new Map();
+    if (seedList?.length > 0) {
+      seeds = seedList
+        .filter((s) => typeof s === 'string')
+        .map((s) => s.replace(/^r\//, '').toLowerCase())
+        .filter((s) => !isNonUsSub(s));
+      seeds.forEach((s) => seedTierMap.set(s, 'custom'));
+    } else {
+      const demoted = await getDemotedSeeds();
+      const priority = PRIORITY_SEEDS.filter((s) => !isNonUsSub(s) && !demoted.has(s.toLowerCase()));
+      const secondary = SECONDARY_SEEDS.filter((s) => !isNonUsSub(s) && !demoted.has(s.toLowerCase()));
+      const discovered = (await getDiscoveredSeeds()).filter((s) => !demoted.has(s));
+      priority.forEach((s) => seedTierMap.set(s.toLowerCase(), 'priority'));
+      secondary.forEach((s) => seedTierMap.set(s.toLowerCase(), 'secondary'));
+      discovered.forEach((s) => seedTierMap.set(s, 'discovered'));
+      const seen = new Set();
+      seeds = [...priority, ...secondary, ...discovered].filter((s) => {
+        const k = s.toLowerCase();
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+    }
+    opts.seedTierMap = seedTierMap;
     subsToScrape = seeds.slice(cursor, cursor + subsLimit);
     if (subsToScrape.length === 0) {
       return {
@@ -199,115 +261,191 @@ async function runDiscovery(opts) {
     postsBySub.get(p.subreddit).push(p);
   }
 
-  const qualifyingBySub = {};
+  const allSubData = {};
   const nearMisses = [];
+  const toPromote = [];
+  const runDate = new Date().toISOString().slice(0, 10);
 
   for (const sub of subsToScrape) {
     const posts = postsBySub.get(sub.toLowerCase()) || [];
     const members = null;
+    const recentPosts = posts.filter((p) => (p.created_utc || 0) >= cutoffUtc);
+    const inWindowNoOom = recentPosts.filter(
+      (p) => !hasOutOfMarketSignal((p.title || '') + ' ' + (p.selftext || ''))
+    );
+    const withComment = inWindowNoOom.filter((p) => (p.num_comments || 0) >= 1);
+    const postsScanned = withComment.length;
 
     const qualifying = [];
-    for (const p of posts) {
-      const createdUtc = p.created_utc || 0;
-      if (createdUtc < cutoffUtc) continue;
-      if (hasOutOfMarketSignal((p.title || '') + ' ' + (p.selftext || ''))) continue;
-      if (!qualifiesForProblemSpace((p.title || '') + ' ' + (p.selftext || ''), frictionKeywords)) continue;
-      qualifying.push({
-        id: p.id,
-        subreddit: sub,
-        title: p.title,
-        selftext: (p.selftext || '').substring(0, 500),
-        score: p.score ?? 0,
-        num_comments: p.num_comments ?? 0,
-        created_utc: createdUtc,
-        permalink: p.permalink || '',
-        url: p.url || `https://reddit.com${p.permalink || ''}`,
-      });
+    let totalPainScore = 0;
+    for (const p of withComment) {
+      const text = (p.title || '') + ' ' + (p.selftext || '');
+      const painScore = computePostPainScore(text);
+      const qualifies = qualifiesForProblemSpace(text, frictionKeywords) || painScore > 0;
+      totalPainScore += painScore;
+      if (qualifies) {
+        qualifying.push({
+          id: p.id,
+          subreddit: sub,
+          title: p.title,
+          selftext: (p.selftext || '').substring(0, 500),
+          score: p.score ?? 0,
+          num_comments: p.num_comments ?? 0,
+          created_utc: p.created_utc,
+          permalink: p.permalink || '',
+          url: p.url || `https://reddit.com${p.permalink || ''}`,
+          painScore,
+        });
+      }
     }
+
+    const painDensity = postsScanned > 0 ? totalPainScore / postsScanned : 0;
+    if (mode === 'search' && painDensity >= PROMOTION_PAIN_DENSITY && qualifying.length >= PROMOTION_QUALIFYING_POSTS) {
+      toPromote.push({ subreddit: sub, painDensity, qualifyingPosts: qualifying.length });
+    }
+
+    const allText = inWindowNoOom.map((p) => (p.title || '') + ' ' + (p.selftext || '')).join(' ');
+    const icpScore = icpMatchScore(sub, allText);
+    const hasEvidence = qualifying.length > 0;
 
     if (members != null && members > 0 && members < MIN_MEMBERS) {
       nearMisses.push({ subreddit: sub, members, reason: 'too small', details: `${members} members` });
-      continue;
     }
-    if (qualifying.length === 0) {
-      const nm = { subreddit: sub, members, reason: '', details: '' };
-      if (posts.length === 0) nm.reason = 'no posts returned';
-      else if (posts.length < 5) nm.reason = 'low recent activity';
-      else nm.reason = 'no matching posts in window';
-      nm.details = nm.reason;
-      nearMisses.push(nm);
-      continue;
-    }
-    qualifyingBySub[sub] = { qualifying, totalFetched: posts.length, members: members ?? 0 };
+
+    allSubData[sub] = {
+      qualifying,
+      totalFetched: posts.length,
+      postsScanned,
+      totalPainScore,
+      painDensity,
+      members: members ?? 0,
+      hasEvidence,
+      icpMatchScore: icpScore,
+      inWindowNoOom,
+    };
   }
 
   const communities = [];
-  for (const [sub, data] of Object.entries(qualifyingBySub)) {
-    const { qualifying, totalFetched, members } = data;
-    const painPostRatio = totalFetched > 0 ? qualifying.length / totalFetched : 0;
-    const demandScore = qualifying.length;
-    const lowCommentCount = qualifying.filter((p) => (p.num_comments || 0) < 3).length;
-    const opportunityScore = qualifying.length > 0 ? lowCommentCount / qualifying.length : 0;
-    const activityScore = qualifying.length;
-    const allText = qualifying.map((p) => (p.title || '') + ' ' + (p.selftext || '')).join(' ');
-    const coOccurringKeywords = extractCoOccurring(allText, frictionKeywords);
-    const w1 = 0.25; const w2 = 0.3; const w3 = 0.2; const w4 = 0.25;
-    const priorityScore = Math.min(
-      100,
-      Math.round(
-        w1 * painPostRatio * 100 +
-          w2 * opportunityScore * 100 +
-          w3 * Math.min(activityScore / 20, 1) * 100 +
-          w4 * Math.min(demandScore / 15, 1) * 100
-      )
-    );
-    const samplePosts = qualifying
-      .sort((a, b) => (b.score || 0) - (a.score || 0))
-      .slice(0, 10)
-      .map((p) => ({
-        id: p.id,
-        title: p.title,
-        selftextSnippet: (p.selftext || '').substring(0, 200),
-        url: p.url,
-        numComments: p.num_comments,
-        score: p.score,
-        createdUtc: p.created_utc,
-      }));
+  for (const [sub, data] of Object.entries(allSubData)) {
+    const { qualifying, totalFetched, members, hasEvidence, icpMatchScore: icpScore, inWindowNoOom } = data;
 
+    let painPostRatio, demandScore, opportunityScore, activityScore, priorityScore, coOccurringKeywords, samplePosts, lowConfidence;
+
+    if (hasEvidence) {
+      painPostRatio = totalFetched > 0 ? qualifying.length / totalFetched : 0;
+      demandScore = qualifying.length;
+      const lowCommentCount = qualifying.filter((p) => (p.num_comments || 0) < 3).length;
+      opportunityScore = qualifying.length > 0 ? lowCommentCount / qualifying.length : 0;
+      activityScore = qualifying.length;
+      const qualText = qualifying.map((p) => (p.title || '') + ' ' + (p.selftext || '')).join(' ');
+      coOccurringKeywords = extractCoOccurring(qualText, frictionKeywords);
+      const w1 = 0.25; const w2 = 0.3; const w3 = 0.2; const w4 = 0.25;
+      priorityScore = Math.min(
+        100,
+        Math.round(
+          w1 * painPostRatio * 100 +
+            w2 * opportunityScore * 100 +
+            w3 * Math.min(activityScore / 20, 1) * 100 +
+            w4 * Math.min(demandScore / 15, 1) * 100
+        )
+      );
+      samplePosts = qualifying
+        .sort((a, b) => (b.score || 0) - (a.score || 0))
+        .slice(0, 10)
+        .map((p) => ({
+          id: p.id,
+          title: p.title,
+          selftextSnippet: (p.selftext || '').substring(0, 200),
+          url: p.url,
+          numComments: p.num_comments,
+          score: p.score,
+          createdUtc: p.created_utc,
+        }));
+      lowConfidence = qualifying.length < 2;
+    } else {
+      painPostRatio = 0;
+      demandScore = 0;
+      opportunityScore = 0;
+      activityScore = inWindowNoOom.length;
+      const allText = inWindowNoOom.map((p) => (p.title || '') + ' ' + (p.selftext || '')).join(' ');
+      coOccurringKeywords = extractCoOccurring(allText, frictionKeywords);
+      priorityScore = icpScore;
+      samplePosts = inWindowNoOom
+        .sort((a, b) => (b.score || 0) - (a.score || 0))
+        .slice(0, 5)
+        .map((p) => ({
+          id: p.id,
+          title: p.title,
+          selftextSnippet: (p.selftext || '').substring(0, 200),
+          url: p.url || `https://reddit.com${p.permalink || ''}`,
+          numComments: p.num_comments,
+          score: p.score,
+          createdUtc: p.created_utc,
+        }));
+      lowConfidence = true;
+    }
+
+    const seedTier = mode === 'search' ? 'search' : (opts.seedTierMap?.get(sub.toLowerCase()) || 'seed');
     communities.push({
       subreddit: sub,
       url: `https://reddit.com/r/${sub}`,
-      painPostRatio: Math.round(painPostRatio * 100) / 100,
-      demandScore,
-      opportunityScore: Math.round(opportunityScore * 100) / 100,
-      activityScore,
-      priorityScore,
+      painPostRatio: Math.round((painPostRatio || 0) * 100) / 100,
+      demandScore: demandScore || 0,
+      opportunityScore: Math.round((opportunityScore || 0) * 100) / 100,
+      activityScore: activityScore || 0,
+      priorityScore: priorityScore || icpScore,
       memberCount: members,
-      coOccurringKeywords,
-      samplePosts,
-      lowConfidence: qualifying.length < 2,
+      coOccurringKeywords: coOccurringKeywords || [],
+      samplePosts: samplePosts || [],
+      lowConfidence: lowConfidence ?? true,
+      hasEvidence,
+      icpMatchScore: icpScore,
+      seedTier,
+      painDensity: allSubData[sub]?.painDensity,
     });
   }
 
-  communities.sort((a, b) => b.priorityScore - a.priorityScore);
-  const rawPostCount = Object.values(qualifyingBySub).reduce((sum, d) => sum + d.qualifying.length, 0);
+  communities.sort((a, b) => {
+    const aScore = (a.hasEvidence ? 1000 : 0) + (a.priorityScore || 0) + (a.icpMatchScore || 0) / 10;
+    const bScore = (b.hasEvidence ? 1000 : 0) + (b.priorityScore || 0) + (b.icpMatchScore || 0) / 10;
+    return bScore - aScore;
+  });
+  const rawPostCount = Object.values(allSubData).reduce((sum, d) => sum + (d.qualifying?.length || 0), 0);
   const topNearMisses = nearMisses.sort((a, b) => (b.members ?? 0) - (a.members ?? 0)).slice(0, 20);
 
   const timeMs = Date.now() - startTime;
 
   const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY;
-  if (runId && process.env.SUPABASE_URL && supabaseKey) {
+  if (process.env.SUPABASE_URL && supabaseKey) {
     try {
-      await upsertDiscoveryRun({
-        runId,
-        subreddits: subsToScrape,
-        communitiesCount: communities.length,
-        nearMissesCount: topNearMisses.length,
-        rawPostCount,
-        status: 'completed',
-      });
-      if (communities.length > 0) {
-        await upsertCommunities(runId, communities);
+      for (const { subreddit, painDensity, qualifyingPosts } of toPromote) {
+        await upsertDiscoveredSeed(subreddit, painDensity, qualifyingPosts, false);
+      }
+      if (mode === 'seed') {
+        for (const [sub, data] of Object.entries(allSubData)) {
+          await upsertSeedRun({
+            subreddit: sub,
+            runDate,
+            runId,
+            postsScanned: data.postsScanned ?? 0,
+            qualifyingPosts: data.qualifying?.length ?? 0,
+            painDensity: data.postsScanned > 0 ? data.painDensity : null,
+            seedTier: opts.seedTierMap?.get(sub) || 'seed',
+          });
+        }
+      }
+      if (runId) {
+        await upsertDiscoveryRun({
+          runId,
+          subreddits: subsToScrape,
+          communitiesCount: communities.length,
+          nearMissesCount: topNearMisses.length,
+          rawPostCount,
+          status: 'completed',
+        });
+        if (communities.length > 0) {
+          await upsertCommunities(runId, communities);
+        }
       }
     } catch (e) {
       console.error('Supabase upsert error:', e);
