@@ -1,0 +1,15 @@
+{
+  "name": "discovery-worker",
+  "version": "1.0.0",
+  "description": "Railway discovery worker for Reddit discovery",
+  "main": "server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
