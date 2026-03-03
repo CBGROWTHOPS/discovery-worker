@@ -232,7 +232,8 @@ async function runDiscovery(opts) {
 
   const timeMs = Date.now() - startTime;
 
-  if (runId && process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
+  const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY;
+  if (runId && process.env.SUPABASE_URL && supabaseKey) {
     try {
       await upsertDiscoveryRun({
         runId,
