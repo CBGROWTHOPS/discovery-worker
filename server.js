@@ -26,8 +26,10 @@ app.post('/reddit/discovery', async (req, res) => {
     const limitPerSub = Math.min(Math.max(1, parseInt(body.limitPerSub, 10) || 100), 100);
     const cursor = Math.max(0, parseInt(body.cursor, 10) || 0);
     const subsLimit = Math.min(Math.max(1, parseInt(body.subsLimit, 10) || 15), 50);
+    const mode = body.mode === 'seed' ? 'seed' : 'search';
+    const searchMaxItems = Math.min(Math.max(100, parseInt(body.searchMaxItems, 10) || 1500), 2000);
 
-    const result = await runDiscovery({ seedList, recencyDays, limitPerSub, cursor, subsLimit });
+    const result = await runDiscovery({ seedList, recencyDays, limitPerSub, cursor, subsLimit, mode, searchMaxItems });
     res.json(result);
   } catch (e) {
     console.error('Discovery error:', e);

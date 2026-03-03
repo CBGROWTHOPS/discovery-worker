@@ -135,6 +135,43 @@ async function runRedditActor(subreddits, maxPostsPerSubreddit = 100, sort = 'ne
 }
 
 /**
+ * Run Reddit search across all of Reddit (assumption-free discovery).
+ * Uses trudax searches - returns posts from ANY subreddit matching keywords.
+ * Only works with trudax~reddit-scraper-lite.
+ */
+async function runRedditSearch(searches, maxItems = 1000, sort = 'new') {
+  const actorId = process.env.APIFY_REDDIT_ACTOR || DEFAULT_REDDIT_ACTOR;
+  if (!actorId.includes('trudax')) {
+    throw new Error('Reddit search requires trudax~reddit-scraper-lite (set APIFY_REDDIT_ACTOR)');
+  }
+  const input = {
+    searches: Array.isArray(searches) ? searches : [searches],
+    maxItems: Math.min(maxItems, 2000),
+    sort: sort || 'new',
+    searchPosts: true,
+    searchComments: false,
+    searchCommunities: false,
+    searchUsers: false,
+    proxy: { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'] },
+    skipComments: true,
+  };
+  const { id: runId, defaultDatasetId } = await startRun(actorId, input);
+  const start = Date.now();
+  while (Date.now() - start < POLL_TIMEOUT_MS) {
+    const { status } = await getRunStatus(runId);
+    if (status === 'SUCCEEDED') {
+      const items = await getDatasetItems(defaultDatasetId);
+      return { runId, datasetId: defaultDatasetId, items };
+    }
+    if (status === 'FAILED' || status === 'ABORTED' || status === 'TIMED-OUT') {
+      throw new Error(`Apify run ${status}: ${runId}`);
+    }
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  }
+  throw new Error(`Apify run timed out after ${POLL_TIMEOUT_MS / 1000}s`);
+}
+
+/**
  * Run any Apify actor with given input. Returns { runId, items }.
  */
 async function runActor(actorId, input) {
@@ -153,4 +190,4 @@ async function runActor(actorId, input) {
   throw new Error(`Apify run timed out after ${POLL_TIMEOUT_MS / 1000}s`);
 }
 
-module.exports = { runRedditActor, runActor, startRun, getRunStatus, getDatasetItems, getToken };
+module.exports = { runRedditActor, runRedditSearch, runActor, startRun, getRunStatus, getDatasetItems, getToken };

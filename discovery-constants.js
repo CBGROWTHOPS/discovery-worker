@@ -1,4 +1,18 @@
+// Search phrases for assumption-free discovery (Reddit search across all subs)
+const SEARCH_KEYWORDS = [
+  'medical bill',
+  'cant afford insurance',
+  'no insurance',
+  'high deductible',
+  'uninsured',
+  'out of pocket',
+  'afford healthcare',
+  'medical cost',
+  'no benefits',
+];
+
 module.exports = {
+  SEARCH_KEYWORDS,
   HEALTHCARE_FRICTION_KEYWORDS: [
     'cant afford', "can't afford", "can't afford healthcare", 'cant afford doctor',
     'no insurance', 'without insurance', 'no insurance what do i do', 'uninsured',

@@ -5,16 +5,18 @@ Railway-hosted service that orchestrates Apify Reddit runs, scores results, and 
 ## Flow
 
 1. Vercel API → Railway
-2. Railway starts Apify actor `alex_claw/reddit-scraper`, polls until done
-3. Fetches dataset items, normalizes, scores (healthcare friction keywords)
-4. Upserts to Supabase (`discovery_runs`, `discovery_communities`)
-5. Returns summary JSON with `runId`, counts, communities
+2. **Search mode (default):** Reddit search for healthcare friction keywords across all of Reddit — discovers any subreddit. Requires `trudax~reddit-scraper-lite`.
+3. **Seed mode:** Scrape from fixed seed list (use `mode: 'seed'` in body).
+4. Fetches dataset items, normalizes, scores (healthcare friction keywords)
+5. Upserts to Supabase (`discovery_runs`, `discovery_communities`)
+6. Returns summary JSON with `runId`, counts, communities
 
 ## Env vars (Railway)
 
 | Var | Required | Description |
 |-----|----------|-------------|
 | `APIFY_TOKEN` | yes | Apify API token |
+| `APIFY_REDDIT_ACTOR` | optional | `trudax~reddit-scraper-lite` (default) for search; `crawlerbros~reddit-scraper` or `alex_claw~reddit-scraper` for seed |
 | `SUPABASE_URL` | for persistence | Supabase project URL |
 | `SUPABASE_SERVICE_KEY` or `SUPABASE_ANON_KEY` | for persistence | Supabase key with insert/update on discovery tables |
 

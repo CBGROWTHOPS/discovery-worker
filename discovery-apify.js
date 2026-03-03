@@ -2,9 +2,10 @@
  * Discovery via Apify: run actor, normalize, score, upsert Supabase, return summary.
  */
 
-const { runRedditActor } = require('./apify');
+const { runRedditActor, runRedditSearch } = require('./apify');
 const {
   HEALTHCARE_FRICTION_KEYWORDS,
+  SEARCH_KEYWORDS,
   OUT_OF_MARKET_SIGNALS,
   NON_US_SUBREDDITS,
   SEED_SUBREDDITS,
@@ -82,54 +83,108 @@ function normalizePost(item) {
 
 async function runDiscovery(opts) {
   const startTime = Date.now();
-  const { seedList, recencyDays = 30, limitPerSub = 100, cursor = 0, subsLimit = 15 } = opts;
+  const {
+    seedList,
+    recencyDays = 30,
+    limitPerSub = 100,
+    cursor = 0,
+    subsLimit = 15,
+    mode = 'search',
+    searchMaxItems = 1500,
+  } = opts;
 
-  const seeds =
-    seedList?.length > 0
-      ? seedList
-          .filter((s) => typeof s === 'string')
-          .map((s) => s.replace(/^r\//, '').toLowerCase())
-          .filter((s) => !isNonUsSub(s))
-      : SEED_SUBREDDITS.filter((s) => !isNonUsSub(s));
+  let runId;
+  let items = [];
+  let subsToScrape = [];
 
-  const subsToScrape = seeds.slice(cursor, cursor + subsLimit);
-  if (subsToScrape.length === 0) {
+  if (mode === 'search') {
+    try {
+      const result = await runRedditSearch(SEARCH_KEYWORDS, searchMaxItems, 'new');
+      runId = result.runId;
+      items = result.items || [];
+      const uniqueSubs = new Set();
+      for (const item of items) {
+        const sub = (item.subreddit || item.communityName || item.parsedCommunityName || '').toLowerCase();
+        if (sub && !isNonUsSub(sub)) uniqueSubs.add(sub);
+      }
+      subsToScrape = [...uniqueSubs];
+    } catch (e) {
+      console.error('Apify search error:', e);
+      return {
+        cursor: 0,
+        nextCursor: null,
+        processedCount: 0,
+        communities: [],
+        nearMisses: [{ subreddit: '—', reason: 'apify search failed', details: e.message }],
+        rawPostCount: 0,
+        totalCommunitiesScored: 0,
+        runId: null,
+        error: e.message,
+        fetchedAt: new Date().toISOString(),
+        timeMs: Date.now() - startTime,
+        debug: { recencyDays, mode: 'search', source: 'apify' },
+      };
+    }
+  } else {
+    const seeds =
+      seedList?.length > 0
+        ? seedList
+            .filter((s) => typeof s === 'string')
+            .map((s) => s.replace(/^r\//, '').toLowerCase())
+            .filter((s) => !isNonUsSub(s))
+        : SEED_SUBREDDITS.filter((s) => !isNonUsSub(s));
+    subsToScrape = seeds.slice(cursor, cursor + subsLimit);
+    if (subsToScrape.length === 0) {
+      return {
+        cursor,
+        nextCursor: null,
+        processedCount: 0,
+        communities: [],
+        nearMisses: [],
+        rawPostCount: 0,
+        totalCommunitiesScored: 0,
+        runId: null,
+        fetchedAt: new Date().toISOString(),
+        timeMs: Date.now() - startTime,
+        debug: { recencyDays, seedsUsed: seeds.length, source: 'apify' },
+      };
+    }
+    try {
+      const result = await runRedditActor(subsToScrape, Math.min(limitPerSub, 500), 'new');
+      runId = result.runId;
+      items = result.items || [];
+    } catch (e) {
+      console.error('Apify error:', e);
+      return {
+        cursor,
+        nextCursor: cursor,
+        processedCount: 0,
+        communities: [],
+        nearMisses: subsToScrape.map((s) => ({ subreddit: s, reason: 'apify failed', details: e.message })),
+        rawPostCount: 0,
+        totalCommunitiesScored: 0,
+        runId: null,
+        error: e.message,
+        fetchedAt: new Date().toISOString(),
+        timeMs: Date.now() - startTime,
+        debug: { recencyDays, seedsUsed: seeds.length, source: 'apify' },
+      };
+    }
+  }
+
+  if (subsToScrape.length === 0 && items.length === 0) {
     return {
-      cursor,
+      cursor: 0,
       nextCursor: null,
       processedCount: 0,
       communities: [],
       nearMisses: [],
       rawPostCount: 0,
       totalCommunitiesScored: 0,
-      runId: null,
+      runId,
       fetchedAt: new Date().toISOString(),
       timeMs: Date.now() - startTime,
-      debug: { recencyDays, seedsUsed: seeds.length, source: 'apify' },
-    };
-  }
-
-  let runId;
-  let items = [];
-  try {
-    const result = await runRedditActor(subsToScrape, Math.min(limitPerSub, 500), 'new');
-    runId = result.runId;
-    items = result.items || [];
-  } catch (e) {
-    console.error('Apify error:', e);
-    return {
-      cursor,
-      nextCursor: cursor,
-      processedCount: 0,
-      communities: [],
-      nearMisses: subsToScrape.map((s) => ({ subreddit: s, reason: 'apify failed', details: e.message })),
-      rawPostCount: 0,
-      totalCommunitiesScored: 0,
-      runId: null,
-      error: e.message,
-      fetchedAt: new Date().toISOString(),
-      timeMs: Date.now() - startTime,
-      debug: { recencyDays, seedsUsed: seeds.length, source: 'apify' },
+      debug: { recencyDays, mode, source: 'apify' },
     };
   }
 
@@ -259,9 +314,17 @@ async function runDiscovery(opts) {
     }
   }
 
+  const seedsCount = mode === 'seed' ? (seedList?.length || SEED_SUBREDDITS.filter((s) => !isNonUsSub(s)).length) : 0;
+  const nextCursor =
+    mode === 'seed' && seedsCount > 0
+      ? cursor + subsToScrape.length < seedsCount
+        ? cursor + subsToScrape.length
+        : null
+      : null;
+
   return {
-    cursor,
-    nextCursor: cursor + subsToScrape.length < seeds.length ? cursor + subsToScrape.length : null,
+    cursor: mode === 'search' ? 0 : cursor,
+    nextCursor,
     processedCount: subsToScrape.length,
     communities,
     nearMisses: topNearMisses,
@@ -270,7 +333,13 @@ async function runDiscovery(opts) {
     runId,
     fetchedAt: new Date().toISOString(),
     timeMs,
-    debug: { recencyDays, seedsUsed: seeds.length, source: 'apify' },
+    debug: {
+      recencyDays,
+      mode,
+      seedsUsed: mode === 'seed' ? (seedList?.length || SEED_SUBREDDITS.length) : null,
+      searchSubsDiscovered: mode === 'search' ? subsToScrape.length : null,
+      source: 'apify',
+    },
   };
 }
 
