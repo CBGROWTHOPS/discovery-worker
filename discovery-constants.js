@@ -1,5 +1,6 @@
-// Search phrases for assumption-free discovery (Reddit search across all subs)
+// Search phrases: ICP (who they are) + friction (pain). Finds communities where target personas are AND where friction is expressed.
 const SEARCH_KEYWORDS = [
+  // Friction (pain)
   'medical bill',
   'cant afford insurance',
   'no insurance',
@@ -9,6 +10,17 @@ const SEARCH_KEYWORDS = [
   'afford healthcare',
   'medical cost',
   'no benefits',
+  // ICP (where target personas could be)
+  'gig worker',
+  'freelancer healthcare',
+  'self employed insurance',
+  '1099 benefits',
+  'contractor health',
+  'no employer insurance',
+  'family health plan',
+  'roommates insurance',
+  'rural healthcare',
+  'budget healthcare',
 ];
 
 module.exports = {
